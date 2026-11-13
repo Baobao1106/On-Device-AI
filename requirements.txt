@@ -1,0 +1,21 @@
+# Jetson ERP Challenge - Requirements
+# Python 3.10 or 3.11 recommended
+
+# Core Computer Vision & Numerical Computing
+numpy>=1.23.0
+scipy>=1.10.0
+opencv-python>=4.8.0
+scikit-image>=0.20.0
+
+# Deep Learning & Feature Matching
+torch>=2.0.0
+torchvision>=0.15.0
+lightglue>=0.0.4
+
+# Perceptual Quality Scoring
+lpips>=0.1.4
+
+# Data Processing & Utilities
+matplotlib>=3.7.0
+openpyxl>=3.1.0
+tqdm>=4.65.0
