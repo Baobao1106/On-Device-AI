@@ -129,28 +129,157 @@ def classify_rings(images_dir: str, image_names: List[str], weights_path: str = 
     return assigned
 
 
+# Biến toàn cục lưu trữ mô hình Feature Matcher
+_extractor = None
+_matcher = None
+
+
+def get_lightglue_models():
+    """Tải và lưu trữ mô hình SuperPoint + LightGlue."""
+    global _extractor, _matcher
+    if _matcher is None:
+        from lightglue import LightGlue, SuperPoint
+        _extractor = SuperPoint(max_num_keypoints=1024).eval().to(_device)
+        _matcher = LightGlue(features="superpoint").eval().to(_device)
+    return _extractor, _matcher
+
+
 def extract_features(image_path: str) -> Dict[str, any]:
     """
     [BƯỚC 2A]: Trích xuất điểm đặc trưng (Keypoints) và Descriptors bằng SuperPoint.
     """
-    # TODO: Thành viên 2 hoàn thiện hàm này
-    raise NotImplementedError("Thành viên 2 cần cài đặt hàm extract_features()")
+    from lightglue.utils import load_image
+    extractor, _ = get_lightglue_models()
+    image = load_image(image_path).to(_device)
+    with torch.no_grad():
+        feats = extractor.extract(image)
+    return feats
 
 
-def match_pair(img_path0: str, img_path1: str) -> Tuple[np.ndarray, np.ndarray]:
+def match_pair(img_path0: str, img_path1: str) -> Tuple[np.ndarray, np.ndarray, int]:
     """
     [BƯỚC 2B]: So sánh và bắt cặp điểm tương ứng giữa 2 bức ảnh tiếp giáp bằng LightGlue.
+    
+    Giá trị trả về:
+        - pts0: Tọa độ pixel (M, 2) trên ảnh 0
+        - pts1: Tọa độ pixel (M, 2) trên ảnh 1
+        - num_matches: Số lượng điểm khớp hợp lệ (M)
     """
-    # TODO: Thành viên 2 hoàn thiện hàm này
-    raise NotImplementedError("Thành viên 2 cần cài đặt hàm match_pair()")
+    from lightglue.utils import load_image, rbd
+    extractor, matcher = get_lightglue_models()
+
+    im0 = load_image(img_path0).to(_device)
+    im1 = load_image(img_path1).to(_device)
+
+    with torch.no_grad():
+        f0 = extractor.extract(im0)
+        f1 = extractor.extract(im1)
+        res = matcher({"image0": f0, "image1": f1})
+
+    f0, f1, res = [rbd(x) for x in [f0, f1, res]]
+    matches = res["matches"]
+    pts0 = f0["keypoints"][matches[..., 0]].cpu().numpy()
+    pts1 = f1["keypoints"][matches[..., 1]].cpu().numpy()
+
+    return pts0, pts1, len(matches)
 
 
-def build_match_graph(images_dir: str, rings_dict: Dict[str, any]) -> Dict[Tuple[str, str], Dict[str, np.ndarray]]:
+def build_match_graph(images_dir: str, rings_dict: Dict[str, any]) -> Dict[Tuple[str, str], Dict[str, any]]:
     """
     [BƯỚC 2C]: Xây dựng đồ thị kết nối điểm cho toàn bộ các cặp ảnh kề nhau.
+    
+    Quy trình:
+        1. Trích xuất đặc trưng SuperPoint cho 24 ảnh một lần duy nhất (cache).
+        2. Sắp xếp 8 ảnh tầng Horizon thành vòng tròn 360 độ khép kín (Hamilton cycle).
+        3. Kết nối tầng Up với Zenith và Horizon; tầng Down với Nadir và Horizon.
+        4. Trả về dictionary chứa tọa độ điểm khớp giữa các cặp ảnh tiếp giáp.
     """
-    # TODO: Thành viên 2 hoàn thiện hàm này
-    raise NotImplementedError("Thành viên 2 cần cài đặt hàm build_match_graph()")
+    from lightglue.utils import rbd
+    _, matcher = get_lightglue_models()
+
+    all_names = [rings_dict["zenith"]] + rings_dict["up"] + rings_dict["horizon"] + rings_dict["down"] + [rings_dict["nadir"]]
+    print(f"[TV2] Trích xuất đặc trưng SuperPoint cho {len(all_names)} ảnh...")
+
+    feats_cache = {}
+    for name in all_names:
+        p = os.path.join(images_dir, name)
+        feats_cache[name] = extract_features(p)
+
+    def match_cached(name_a, name_b):
+        f0, f1 = feats_cache[name_a], feats_cache[name_b]
+        with torch.no_grad():
+            res = matcher({"image0": f0, "image1": f1})
+        f0_r, f1_r, res_r = [rbd(x) for x in [f0, f1, res]]
+        m = res_r["matches"]
+        p0 = f0_r["keypoints"][m[..., 0]].cpu().numpy()
+        p1 = f1_r["keypoints"][m[..., 1]].cpu().numpy()
+        return p0, p1, len(m)
+
+    matches_dict = {}
+
+    # 1. XẾP THỨ TỰ VÒNG TRÒN 8 ẢNH HORIZON
+    h_imgs = rings_dict["horizon"]
+    n_h = len(h_imgs)
+    h_adj = np.zeros((n_h, n_h), dtype=int)
+    h_cache = {}
+
+    print(f"[TV2] Đang xác định thứ tự xoay 360 độ cho 8 ảnh tầng Horizon...")
+    for i in range(n_h):
+        for j in range(i + 1, n_h):
+            p0, p1, n_m = match_cached(h_imgs[i], h_imgs[j])
+            h_adj[i, j] = h_adj[j, i] = n_m
+            h_cache[(i, j)] = (p0, p1, n_m)
+            h_cache[(j, i)] = (p1, p0, n_m)
+
+    # Tìm chu trình vòng tròn nối 8 ảnh có trọng số match lớn nhất
+    curr = 0
+    visited = [curr]
+    while len(visited) < n_h:
+        unvisited = [k for k in range(n_h) if k not in visited]
+        next_node = max(unvisited, key=lambda k: h_adj[curr, k])
+        visited.append(next_node)
+        curr = next_node
+
+    ordered_horizon = [h_imgs[i] for i in visited]
+    rings_dict["horizon_ordered"] = ordered_horizon
+
+    # Lưu matches giữa các cặp kề nhau trong vòng tròn Horizon
+    for k in range(n_h):
+        i_curr, i_next = visited[k], visited[(k + 1) % n_h]
+        p0, p1, n_m = h_cache.get((i_curr, i_next), match_cached(h_imgs[i_curr], h_imgs[i_next]))
+        matches_dict[(h_imgs[i_curr], h_imgs[i_next])] = {
+            "pts0": p0, "pts1": p1, "num_matches": n_m
+        }
+
+    # 2. KẾT NỐI ẢNH TRẦN (ZENITH) VỚI 7 ẢNH TẦNG UP
+    zenith = rings_dict["zenith"]
+    for up_name in rings_dict["up"]:
+        p0, p1, n_m = match_cached(zenith, up_name)
+        if n_m > 5:
+            matches_dict[(zenith, up_name)] = {"pts0": p0, "pts1": p1, "num_matches": n_m}
+
+    # 3. KẾT NỐI ẢNH SÀN (NADIR) VỚI 7 ẢNH TẦNG DOWN
+    nadir = rings_dict["nadir"]
+    for down_name in rings_dict["down"]:
+        p0, p1, n_m = match_cached(nadir, down_name)
+        if n_m > 5:
+            matches_dict[(nadir, down_name)] = {"pts0": p0, "pts1": p1, "num_matches": n_m}
+
+    # 4. KẾT NỐI TẦNG UP VỚI HORIZON & TẦNG DOWN VỚI HORIZON
+    for up_name in rings_dict["up"]:
+        best_h = max(h_imgs, key=lambda h: match_cached(up_name, h)[2])
+        p0, p1, n_m = match_cached(up_name, best_h)
+        if n_m > 5:
+            matches_dict[(up_name, best_h)] = {"pts0": p0, "pts1": p1, "num_matches": n_m}
+
+    for down_name in rings_dict["down"]:
+        best_h = max(h_imgs, key=lambda h: match_cached(down_name, h)[2])
+        p0, p1, n_m = match_cached(down_name, best_h)
+        if n_m > 5:
+            matches_dict[(down_name, best_h)] = {"pts0": p0, "pts1": p1, "num_matches": n_m}
+
+    print(f"[TV2] Hoàn tất xây dựng đồ thị ghép điểm! Tổng số cặp liên kết: {len(matches_dict)}")
+    return matches_dict
 
 
 # =====================================================================
@@ -160,6 +289,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Kiểm thử phân loại 5 tầng ảnh (Thành viên 2)")
     parser.add_argument("--set", default="sets/t01", help="Đường dẫn đến thư mục set (default: sets/t01)")
     parser.add_argument("--weights", default="ring_classifier.pth", help="Đường dẫn file trọng số (default: ring_classifier.pth)")
+    parser.add_argument("--build_graph", action="store_true", help="Chạy tiếp tục bước xây dựng đồ thị ghép điểm LightGlue")
     args = parser.parse_args()
 
     images_dir = os.path.join(args.set, "public", "images")
@@ -231,3 +361,12 @@ if __name__ == "__main__":
         print(f"Tổng kết độ chính xác: {correct_count}/{len(image_names)} "
               f"({correct_count / len(image_names) * 100:.1f}%)")
     print("=" * 65 + "\n")
+
+    if args.build_graph:
+        print("\n--- BẮT ĐẦU XÂY DỰNG ĐỒ THỊ GHÉP ĐIỂM (LIGHTGLUE) ---")
+        graph = build_match_graph(images_dir, rings)
+        print(f"\nThứ tự xoay vòng tròn 8 ảnh Horizon (360 độ):")
+        print(" -> ".join(rings.get("horizon_ordered", [])) + f" -> {rings.get('horizon_ordered', [''])[0]}")
+        total_pts = sum(v["num_matches"] for v in graph.values())
+        print(f"Tổng số cặp tiếp giáp được kết nối: {len(graph)}")
+        print(f"Tổng số điểm matches thu được: {total_pts} (trung bình {total_pts / max(len(graph), 1):.1f} điểm/cặp)\n")
