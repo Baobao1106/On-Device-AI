@@ -217,7 +217,7 @@ def build_match_graph(images_dir: str, rings_dict: Dict[str, any]) -> Dict[Tuple
 
     matches_dict = {}
 
-    # 1. XẾP THỨ TỰ VÒNG TRÒN 8 ẢNH HORIZON
+    # 1. XẾP THỨ TỰ VÒNG TRÒN 8 ẢNH HORIZON (PITCH ~ 0°)
     h_imgs = rings_dict["horizon"]
     n_h = len(h_imgs)
     h_adj = np.zeros((n_h, n_h), dtype=int)
@@ -251,21 +251,65 @@ def build_match_graph(images_dir: str, rings_dict: Dict[str, any]) -> Dict[Tuple
             "pts0": p0, "pts1": p1, "num_matches": n_m
         }
 
-    # 2. KẾT NỐI ẢNH TRẦN (ZENITH) VỚI 7 ẢNH TẦNG UP
+    # 2. XẾP THỨ TỰ VÒNG TRÒN 7 ẢNH DOWN (PITCH ~ -45°)
+    d_imgs = rings_dict["down"]
+    n_d = len(d_imgs)
+    d_adj = np.zeros((n_d, n_d), dtype=int)
+    d_cache = {}
+
+    print(f"[TV2] Đang xác định thứ tự xoay 360 độ cho 7 ảnh tầng Down...")
+    for i in range(n_d):
+        for j in range(i + 1, n_d):
+            p0, p1, n_m = match_cached(d_imgs[i], d_imgs[j])
+            d_adj[i, j] = d_adj[j, i] = n_m
+            d_cache[(i, j)] = (p0, p1, n_m)
+            d_cache[(j, i)] = (p1, p0, n_m)
+
+    curr_d = 0
+    visited_d = [curr_d]
+    while len(visited_d) < n_d:
+        unvisited = [k for k in range(n_d) if k not in visited_d]
+        next_node = max(unvisited, key=lambda k: d_adj[curr_d, k])
+        visited_d.append(next_node)
+        curr_d = next_node
+
+    ordered_down = [d_imgs[i] for i in visited_d]
+    rings_dict["down_ordered"] = ordered_down
+
+    for k in range(n_d):
+        i_curr, i_next = visited_d[k], visited_d[(k + 1) % n_d]
+        p0, p1, n_m = d_cache.get((i_curr, i_next), match_cached(d_imgs[i_curr], d_imgs[i_next]))
+        if n_m > 0:
+            matches_dict[(d_imgs[i_curr], d_imgs[i_next])] = {
+                "pts0": p0, "pts1": p1, "num_matches": n_m
+            }
+
+    # 3. KẾT NỐI NỘI BỘ TẦNG UP (PITCH ~ +45°)
+    u_imgs = rings_dict["up"]
+    n_u = len(u_imgs)
+    for i in range(n_u):
+        for j in range(i + 1, n_u):
+            p0, p1, n_m = match_cached(u_imgs[i], u_imgs[j])
+            if n_m >= 15:
+                matches_dict[(u_imgs[i], u_imgs[j])] = {
+                    "pts0": p0, "pts1": p1, "num_matches": n_m
+                }
+
+    # 4. KẾT NỐI ẢNH TRẦN (ZENITH) VỚI 7 ẢNH TẦNG UP
     zenith = rings_dict["zenith"]
     for up_name in rings_dict["up"]:
         p0, p1, n_m = match_cached(zenith, up_name)
         if n_m > 5:
             matches_dict[(zenith, up_name)] = {"pts0": p0, "pts1": p1, "num_matches": n_m}
 
-    # 3. KẾT NỐI ẢNH SÀN (NADIR) VỚI 7 ẢNH TẦNG DOWN
+    # 5. KẾT NỐI ẢNH SÀN (NADIR) VỚI 7 ẢNH TẦNG DOWN
     nadir = rings_dict["nadir"]
     for down_name in rings_dict["down"]:
         p0, p1, n_m = match_cached(nadir, down_name)
         if n_m > 5:
             matches_dict[(nadir, down_name)] = {"pts0": p0, "pts1": p1, "num_matches": n_m}
 
-    # 4. KẾT NỐI TẦNG UP VỚI HORIZON & TẦNG DOWN VỚI HORIZON
+    # 6. KẾT NỐI TẦNG UP VỚI HORIZON & TẦNG DOWN VỚI HORIZON
     for up_name in rings_dict["up"]:
         best_h = max(h_imgs, key=lambda h: match_cached(up_name, h)[2])
         p0, p1, n_m = match_cached(up_name, best_h)

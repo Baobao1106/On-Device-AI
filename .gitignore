@@ -48,3 +48,5 @@ pred*.png
 # Operating system files
 .DS_Store
 Thumbs.db
+~$*
+match_demo.jpg
