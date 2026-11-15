@@ -10,9 +10,6 @@ Nhiệm vụ:
 4. build_match_graph(): Xây dựng đồ thị liên kết giữa các cặp ảnh tiếp giáp.
 """
 
-import argparse
-import glob
-import json
 import os
 from typing import Dict, List, Tuple
 
@@ -325,92 +322,3 @@ def build_match_graph(images_dir: str, rings_dict: Dict[str, any]) -> Dict[Tuple
     print(f"[TV2] Hoàn tất xây dựng đồ thị ghép điểm! Tổng số cặp liên kết: {len(matches_dict)}")
     return matches_dict
 
-
-# =====================================================================
-# KHỐI KIỂM THỬ TRỰC TIẾP TỪ TERMINAL (CLI TEST HARNESS)
-# =====================================================================
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Kiểm thử phân loại 5 tầng ảnh (Thành viên 2)")
-    parser.add_argument("--set", default="sets/t01", help="Đường dẫn đến thư mục set (default: sets/t01)")
-    parser.add_argument("--weights", default="ring_classifier.pth", help="Đường dẫn file trọng số (default: ring_classifier.pth)")
-    parser.add_argument("--build_graph", action="store_true", help="Chạy tiếp tục bước xây dựng đồ thị ghép điểm LightGlue")
-    args = parser.parse_args()
-
-    images_dir = os.path.join(args.set, "public", "images")
-    if not os.path.isdir(images_dir):
-        images_dir = args.set  # Nếu truyền thẳng thư mục images
-
-    image_paths = sorted(glob.glob(os.path.join(images_dir, "*.jpg")))
-    if not image_paths:
-        print(f"Lỗi: Không tìm thấy ảnh .jpg nào trong '{images_dir}'!")
-        exit(1)
-
-    image_names = [os.path.basename(p) for p in image_paths]
-    print(f"\n--- BẮT ĐẦU KIỂM THỬ PHÂN LOẠI 5 TẦNG TRÊN: {args.set} ({len(image_names)} ảnh) ---")
-
-    # 1. Chạy hàm phân loại
-    rings = classify_rings(images_dir, image_names, weights_path=args.weights)
-
-    # 2. Đọc nhãn Ground Truth (nếu có thư mục hidden) để so sánh
-    true_poses_path = os.path.join(args.set, "hidden", "true_poses.json")
-    ground_truth = {}
-    if os.path.exists(true_poses_path):
-        with open(true_poses_path, "r", encoding="utf-8") as f:
-            gt_data = json.load(f)
-            for shot in gt_data.get("shots", []):
-                p = shot["pitch_deg"]
-                if p > 65.0:
-                    lbl = "zenith"
-                elif p > 20.0:
-                    lbl = "up"
-                elif p >= -20.0:
-                    lbl = "horizon"
-                elif p >= -65.0:
-                    lbl = "down"
-                else:
-                    lbl = "nadir"
-                ground_truth[shot["image"]] = (lbl, p)
-
-    # 3. Tạo ánh xạ dự đoán cho từng ảnh
-    pred_map = {}
-    pred_map[rings["zenith"]] = "zenith"
-    pred_map[rings["nadir"]] = "nadir"
-    for name in rings["up"]:
-        pred_map[name] = "up"
-    for name in rings["horizon"]:
-        pred_map[name] = "horizon"
-    for name in rings["down"]:
-        pred_map[name] = "down"
-
-    # 4. In bảng so sánh trực quan
-    print("\n" + "=" * 65)
-    print(f"{'Tên ảnh':<12} | {'Tầng dự đoán':<14} | {'Tầng Ground Truth':<18} | {'Kết quả'}")
-    print("-" * 65)
-
-    correct_count = 0
-    for name in sorted(image_names):
-        pred_ring = pred_map.get(name, "unknown")
-        if name in ground_truth:
-            true_ring, pitch = ground_truth[name]
-            is_ok = (pred_ring == true_ring)
-            if is_ok:
-                correct_count += 1
-            status = "✓ Khớp" if is_ok else "✗ Sai"
-            print(f"{name:<12} | {pred_ring:<14} | {true_ring + f' ({pitch:4.1f}°)' :<18} | {status}")
-        else:
-            print(f"{name:<12} | {pred_ring:<14} | {'(Không có GT)':<18} | -")
-
-    print("-" * 65)
-    if ground_truth:
-        print(f"Tổng kết độ chính xác: {correct_count}/{len(image_names)} "
-              f"({correct_count / len(image_names) * 100:.1f}%)")
-    print("=" * 65 + "\n")
-
-    if args.build_graph:
-        print("\n--- BẮT ĐẦU XÂY DỰNG ĐỒ THỊ GHÉP ĐIỂM (LIGHTGLUE) ---")
-        graph = build_match_graph(images_dir, rings)
-        print(f"\nThứ tự xoay vòng tròn 8 ảnh Horizon (360 độ):")
-        print(" -> ".join(rings.get("horizon_ordered", [])) + f" -> {rings.get('horizon_ordered', [''])[0]}")
-        total_pts = sum(v["num_matches"] for v in graph.values())
-        print(f"Tổng số cặp tiếp giáp được kết nối: {len(graph)}")
-        print(f"Tổng số điểm matches thu được: {total_pts} (trung bình {total_pts / max(len(graph), 1):.1f} điểm/cặp)\n")
