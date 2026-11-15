@@ -133,7 +133,10 @@ def create_rings_visualization(set_dir: str, output_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tạo ảnh trực quan 5 tầng")
-    parser.add_argument("--set", default="sets/t01", help="Thư mục set cần trực quan hóa")
-    parser.add_argument("--out", default="rings_layout_t01.jpg", help="Đường dẫn file ảnh xuất ra")
+    parser.add_argument("--set", default="sets/t01", help="Thư mục set cần trực quan hóa (default: sets/t01)")
+    parser.add_argument("--out", default=None, help="Đường dẫn file ảnh xuất ra (mặc định: rings_layout_<tên_set>.jpg)")
     args = parser.parse_args()
-    create_rings_visualization(args.set, args.out)
+
+    set_name = os.path.basename(args.set.rstrip('/\\'))
+    out_path = args.out if args.out else f"rings_layout_{set_name}.jpg"
+    create_rings_visualization(args.set, out_path)
