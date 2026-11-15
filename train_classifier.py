@@ -86,7 +86,9 @@ def get_transforms():
     """Hàm tiền xử lý và augmentation ảnh."""
     train_transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.ColorJitter(brightness=0.15, contrast=0.15),
+        transforms.RandomHorizontalFlip(p=0.5),           
+        transforms.RandomRotation(degrees=5),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -168,9 +170,9 @@ def test_inference_on_set(model, sets_dir: str, test_set_id: str, transform, dev
 def main():
     parser = argparse.ArgumentParser(description="Huấn luyện mô hình phân loại 5 tầng ERP")
     parser.add_argument("--sets", default="sets", help="Thư mục chứa các set (default: sets)")
-    parser.add_argument("--train_sets", nargs="+", default=["t01", "t02", "t03", "t04", "t05", "t06", "t07", "t08"],
+    parser.add_argument("--train_sets", nargs="+", default=[f"t{i:02d}" for i in range(1, 21)],
                         help="Danh sách set dùng để huấn luyện")
-    parser.add_argument("--val_sets", nargs="+", default=["t09", "t10"],
+    parser.add_argument("--val_sets", nargs="+", default=[f"t{i:02d}" for i in range(21, 26)],
                         help="Danh sách set dùng để kiểm thử (validation)")
     parser.add_argument("--epochs", type=int, default=10, help="Số lượt huấn luyện (default: 10)")
     parser.add_argument("--batch_size", type=int, default=16, help="Kích thước batch (default: 16)")
@@ -199,9 +201,16 @@ def main():
     print(f"\nKhởi tạo mô hình MobileNetV3-Small Pre-trained...")
     model = build_model(num_classes=5, device=device)
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    class_weights = torch.tensor([5.0, 1.0, 1.0, 1.0, 5.0], dtype=torch.float).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # Tách tham số thành 2 nhóm với Learning Rate khác nhau
+    optimizer = torch.optim.AdamW([
+        {"params": model.features.parameters(), "lr": 1e-4},    # Backbone học chậm để giữ đặc trưng tốt
+        {"params": model.classifier.parameters(), "lr": 1e-3},  # Head phân loại học nhanh
+    ], weight_decay=0.01)                                       # Chống Overfitting
 
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    
     best_val_acc = 0.0
     start_time = time.time()
 
@@ -240,6 +249,7 @@ def main():
         if val_acc >= best_val_acc:
             best_val_acc = val_acc
             torch.save(model.state_dict(), args.out)
+        scheduler.step()
 
     elapsed = time.time() - start_time
     print("-" * 62)
@@ -248,7 +258,7 @@ def main():
 
     # Tải lại trọng số tốt nhất để chạy thử nghiệm trên set t09
     model.load_state_dict(torch.load(args.out, map_location=device))
-    test_inference_on_set(model, args.sets, "t09", val_tf, device)
+    test_inference_on_set(model, args.sets, "t25", val_tf, device)
 
 
 if __name__ == "__main__":
