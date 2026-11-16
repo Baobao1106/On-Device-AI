@@ -19,6 +19,7 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 
+MIN_REL_GAIN = 0.001  # ngưỡng cải thiện tối thiểu của refine_rings_by_geometry
 CLASS_NAMES = ["zenith", "up", "horizon", "down", "nadir"]
 
 # Biến toàn cục lưu trữ mô hình để tránh nạp lại nhiều lần gây tốn RAM/VRAM
@@ -261,6 +262,65 @@ def build_match_graph(images_dir: str, rings_dict: Dict[str, any]) -> Dict[Tuple
                     break
 
         return [imgs[i] for i in cycle]
+
+    def refine_rings_by_geometry(rings: Dict[str, any]) -> None:
+        """
+        Tinh chỉnh phân tầng bằng đồ thị match (tổng quát cho mọi cặp tầng, không chỉ Nadir<->Down).
+        Điểm của một cách gán = tổng (top-2 match tới ảnh cùng tầng) cho các vòng Horizon/Up/Down
+        + tổng match Zenith->Up + tổng match Nadir->Down. Hill-climbing hoán đổi 2 ảnh khác tầng.
+        """
+        names = [rings["zenith"]] + rings["up"] + rings["horizon"] + rings["down"] + [rings["nadir"]]
+        tier = {rings["zenith"]: "zenith", rings["nadir"]: "nadir"}
+        for key in ("up", "horizon", "down"):
+            for n in rings[key]:
+                tier[n] = key
+
+        adj = {}
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                adj[(a, b)] = adj[(b, a)] = match_cached(a, b)[2]
+
+        def score(t):
+            total = 0
+            for key in ("up", "horizon", "down"):
+                members = [n for n in names if t[n] == key]
+                for n in members:
+                    vals = sorted((adj[(n, m)] for m in members if m != n), reverse=True)
+                    total += sum(vals[:2])
+            z = next(n for n in names if t[n] == "zenith")
+            nd = next(n for n in names if t[n] == "nadir")
+            total += sum(adj[(z, n)] for n in names if t[n] == "up")
+            total += sum(adj[(nd, n)] for n in names if t[n] == "down")
+            return total
+
+        best = score(tier)
+        print(f"[TV2] Điểm đồ thị phân tầng ban đầu: {best}")
+        changed = False
+        while True:
+            cand = None
+            for i, a in enumerate(names):
+                for b in names[i + 1:]:
+                    if tier[a] == tier[b]:
+                        continue
+                    t2 = dict(tier)
+                    t2[a], t2[b] = tier[b], tier[a]
+                    sc = score(t2)
+                    # Chỉ nhận hoán đổi nếu cải thiện đáng kể (>=0.1%) để tránh nhiễu (vd. t01 Up<->Horizon)
+                    if sc > best * (1 + MIN_REL_GAIN) and (cand is None or sc > cand[3]):
+                        cand = (a, b, t2, sc)
+            if cand is None:
+                break
+            a, b, tier, best = cand
+            changed = True
+            print(f"[TV2] Tinh chỉnh phân tầng qua hình học: hoán đổi {a} <-> {b} (điểm đồ thị -> {best})")
+
+        if changed:
+            rings["zenith"] = next(n for n in names if tier[n] == "zenith")
+            rings["nadir"] = next(n for n in names if tier[n] == "nadir")
+            for key in ("up", "horizon", "down"):
+                rings[key] = [n for n in names if tier[n] == key]
+
+    refine_rings_by_geometry(rings_dict)
 
     # 1. XẾP THỨ TỰ VÒNG TRÒN CHO CẢ 3 TẦNG
     print(f"[TV2] Đang xác định thứ tự xoay 360 độ cho 8 ảnh tầng Horizon...")
